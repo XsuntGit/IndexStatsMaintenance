@@ -5,7 +5,7 @@ GO
 SET QUOTED_IDENTIFIER ON
 GO
 
-CREATE OR ALTER PROCEDURE [dbo].[Sys_Index_Maintenance_Exec]
+CREATE OR ALTER PROCEDURE [dbo].[_Sys_Index_Maintenance_Exec]
 (
   @Command nvarchar(max),
   @CommandType nvarchar(max),
@@ -44,9 +44,9 @@ BEGIN
   SET @Error = 0
   SET @ReturnCode = 0
 
-  IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'Sys_Index_Maintenance_Log')
+  IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = '_Sys_Index_Maintenance_Log')
   BEGIN
-    SET @ErrorMessage = 'The table Sys_Index_Maintenance_Log is missing.' + CHAR(13) + CHAR(10) + ' '
+    SET @ErrorMessage = 'The table _Sys_Index_Maintenance_Log is missing.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
@@ -109,7 +109,7 @@ BEGIN
 
   IF @LogToTable = 'Y'
   BEGIN
-    INSERT INTO dbo.Sys_Index_Maintenance_Log (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime)
+    INSERT INTO dbo._Sys_Index_Maintenance_Log (DatabaseName, SchemaName, ObjectName, ObjectType, IndexName, IndexType, StatisticsName, PartitionNumber, ExtendedInfo, CommandType, Command, StartTime)
     VALUES (@DatabaseName, @SchemaName, @ObjectName, @ObjectType, @IndexName, @IndexType, @StatisticsName, @PartitionNumber, @ExtendedInfo, @CommandType, @Command, @StartTime)
   END
 
@@ -147,7 +147,7 @@ BEGIN
 
   IF @LogToTable = 'Y'
   BEGIN
-    UPDATE dbo.Sys_Index_Maintenance_Log
+    UPDATE dbo._Sys_Index_Maintenance_Log
     SET EndTime = @EndTime,
         ErrorNumber = CASE WHEN @Execute = 'N' THEN NULL ELSE @Error END,
         ErrorMessage = @ErrorMessageOriginal

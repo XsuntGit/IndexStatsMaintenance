@@ -5,7 +5,7 @@ GO
 SET QUOTED_IDENTIFIER ON
 GO
 
-CREATE OR ALTER PROCEDURE [dbo].[Sys_Index_Maintenance]
+CREATE OR ALTER PROCEDURE [dbo].[_Sys_Index_Maintenance]
 (
   @Databases nvarchar(max) = NULL,
   @FragmentationLow nvarchar(max) = NULL,
@@ -113,7 +113,8 @@ BEGIN
       @CurrentStatisticsResample nvarchar(max),
       @CurrentComment nvarchar(max),
       @CurrentExtendedInfo xml,
-      @CurrentDelay datetime
+      @CurrentDelay datetime,
+      @CurrentMaxDOPReduction decimal(4,2) = 1
 
   DECLARE @tmpDatabases TABLE (ID int IDENTITY,
                                DatabaseName nvarchar(max),
@@ -186,6 +187,10 @@ BEGIN
 
   SET @StartTime = CONVERT(datetime,CONVERT(nvarchar,GETDATE(),120),120)
 
+  ----------------------------------------------------------------------------------------------------
+  --// Calc maxDOP value                                                                          //--
+  ----------------------------------------------------------------------------------------------------
+
   IF @MaxDOP is NULL
   BEGIN
 
@@ -193,32 +198,37 @@ BEGIN
       @logical_processors int
 
     SELECT @numa_node = COUNT(DISTINCT memory_node_id)
-    FROM sys.dm_os_memory_clerks 
+    FROM sys.dm_os_memory_clerks
     WHERE memory_node_id!=64
 
     SELECT @logical_processors = cpu_count
     FROM sys.dm_os_sys_info
 
     IF @numa_node = 1 and @logical_processors <= 8
-    BEGIN  
+    BEGIN
       --Server with single NUMA node; Less than 8 logical processors; Keep MaxDOP at or below # of logical processors
       SET @MaxDOP = @logical_processors
     END
     IF @numa_node = 1 and @logical_processors > 8
-    BEGIN  
+    BEGIN
       --Server with single NUMA node; Greater than 8 logical processors; Keep MaxDOP at 8
       SET @MaxDOP = 8
     END
     IF @numa_node > 1 and @logical_processors/@numa_node <= 8
-    BEGIN  
+    BEGIN
       --Server with multiple NUMA nodes; Less than 8 logical processors per NUMA node; Keep MaxDOP at or below # of logical processors per NUMA node
       SET @MaxDOP = @logical_processors/@numa_node
     END
     IF @numa_node > 1 and @logical_processors/@numa_node > 8
-    BEGIN  
+    BEGIN
       --Server with multiple NUMA nodes; Greater than 8 logical processors per NUMA node; Keep MaxDOP at 8
       SET @MaxDOP = 8
     END
+
+    IF SERVERPROPERTY('EngineEdition') NOT IN (3,5)
+    SET @MaxDOP = 0
+    ELSE
+    SET @MaxDOP = CEILING(@MaxDOP * @CurrentMaxDOPReduction)
 
   END
 
@@ -261,23 +271,23 @@ BEGIN
   --// Check core requirements                                                                    //--
   ----------------------------------------------------------------------------------------------------
 
-  IF NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = 'Sys_Index_Maintenance_Exec')
+  IF NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = '_Sys_Index_Maintenance_Exec')
   BEGIN
-    SET @ErrorMessage = 'The stored procedure Sys_Index_Maintenance_Exec is missing.' + CHAR(13) + CHAR(10) + ' '
+    SET @ErrorMessage = 'The stored procedure _Sys_Index_Maintenance_Exec is missing.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
 
-  IF EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = 'Sys_Index_Maintenance_Exec' AND (OBJECT_DEFINITION(objects.[object_id]) NOT LIKE '%@LogToTable%' OR OBJECT_DEFINITION(objects.[object_id]) LIKE '%LOCK_TIMEOUT%'))
+  IF EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'P' AND schemas.[name] = 'dbo' AND objects.[name] = '_Sys_Index_Maintenance_Exec' AND (OBJECT_DEFINITION(objects.[object_id]) NOT LIKE '%@LogToTable%' OR OBJECT_DEFINITION(objects.[object_id]) LIKE '%LOCK_TIMEOUT%'))
   BEGIN
-    SET @ErrorMessage = 'The stored procedure Sys_Index_Maintenance_Exec needs to be updated.' + CHAR(13) + CHAR(10) + ' '
+    SET @ErrorMessage = 'The stored procedure _Sys_Index_Maintenance_Exec needs to be updated.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
 
-  IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = 'Sys_Index_Maintenance_Log')
+  IF @LogToTable = 'Y' AND NOT EXISTS (SELECT * FROM sys.objects objects INNER JOIN sys.schemas schemas ON objects.[schema_id] = schemas.[schema_id] WHERE objects.[type] = 'U' AND schemas.[name] = 'dbo' AND objects.[name] = '_Sys_Index_Maintenance_Log')
   BEGIN
-    SET @ErrorMessage = 'The table Sys_Index_Maintenance_Log is missing.' + CHAR(13) + CHAR(10) + ' '
+    SET @ErrorMessage = 'The table _Sys_Index_Maintenance_Log is missing.' + CHAR(13) + CHAR(10) + ' '
     RAISERROR(@ErrorMessage,16,1) WITH NOWAIT
     SET @Error = @@ERROR
   END
@@ -354,7 +364,7 @@ BEGIN
   BEGIN
     INSERT INTO @tmpDatabases (DatabaseName, DatabaseType, AvailabilityGroup, Selected, Completed)
     SELECT [name] AS DatabaseName,
-           CASE WHEN name IN('master','msdb','model') THEN 'S' ELSE 'U' END AS DatabaseType,
+           CASE WHEN name IN('master','msdb','model','rdsadmin') THEN 'S' ELSE 'U' END AS DatabaseType,
            CASE WHEN name IN (SELECT availability_databases_cluster.database_name FROM sys.availability_databases_cluster availability_databases_cluster) THEN 1 ELSE 0 END AS AvailabilityGroup,
            0 AS Selected,
            0 AS Completed
@@ -367,7 +377,7 @@ BEGIN
   BEGIN
     INSERT INTO @tmpDatabases (DatabaseName, DatabaseType, AvailabilityGroup, Selected, Completed)
     SELECT [name] AS DatabaseName,
-           CASE WHEN name IN('master','msdb','model') THEN 'S' ELSE 'U' END AS DatabaseType,
+           CASE WHEN name IN('master','msdb','model','rdsadmin') THEN 'S' ELSE 'U' END AS DatabaseType,
            NULL AS AvailabilityGroup,
            0 AS Selected,
            0 AS Completed
@@ -1402,7 +1412,7 @@ BEGIN
             SET @CurrentCommand13 = @CurrentCommand13 + ')'
           END
 
-          EXECUTE @CurrentCommandOutput13 = [dbo].[Sys_Index_Maintenance_Exec] @Command = @CurrentCommand13, @CommandType = @CurrentCommandType13, @Mode = 2, @Comment = @CurrentComment, @DatabaseName = @CurrentDatabaseName, @SchemaName = @CurrentSchemaName, @ObjectName = @CurrentObjectName, @ObjectType = @CurrentObjectType, @IndexName = @CurrentIndexName, @IndexType = @CurrentIndexType, @PartitionNumber = @CurrentPartitionNumber, @ExtendedInfo = @CurrentExtendedInfo, @LogToTable = @LogToTable, @Execute = @Execute
+          EXECUTE @CurrentCommandOutput13 = [dbo].[_Sys_Index_Maintenance_Exec] @Command = @CurrentCommand13, @CommandType = @CurrentCommandType13, @Mode = 2, @Comment = @CurrentComment, @DatabaseName = @CurrentDatabaseName, @SchemaName = @CurrentSchemaName, @ObjectName = @CurrentObjectName, @ObjectType = @CurrentObjectType, @IndexName = @CurrentIndexName, @IndexType = @CurrentIndexType, @PartitionNumber = @CurrentPartitionNumber, @ExtendedInfo = @CurrentExtendedInfo, @LogToTable = @LogToTable, @Execute = @Execute
           SET @Error = @@ERROR
           IF @Error <> 0 SET @CurrentCommandOutput13 = @Error
           IF @CurrentCommandOutput13 <> 0 SET @ReturnCode = @CurrentCommandOutput13
@@ -1428,7 +1438,7 @@ BEGIN
           IF (@CurrentStatisticsSample IS NOT NULL OR @CurrentStatisticsResample = 'Y') AND @CurrentNoRecompute = 1 SET @CurrentCommand14 = @CurrentCommand14 + ','
           IF @CurrentNoRecompute = 1 SET @CurrentCommand14 = @CurrentCommand14 + ' NORECOMPUTE'
 
-          EXECUTE @CurrentCommandOutput14 = [dbo].[Sys_Index_Maintenance_Exec] @Command = @CurrentCommand14, @CommandType = @CurrentCommandType14, @Mode = 2, @DatabaseName = @CurrentDatabaseName, @SchemaName = @CurrentSchemaName, @ObjectName = @CurrentObjectName, @ObjectType = @CurrentObjectType, @IndexName = @CurrentIndexName, @IndexType = @CurrentIndexType, @StatisticsName = @CurrentStatisticsName, @LogToTable = @LogToTable, @Execute = @Execute
+          EXECUTE @CurrentCommandOutput14 = [dbo].[_Sys_Index_Maintenance_Exec] @Command = @CurrentCommand14, @CommandType = @CurrentCommandType14, @Mode = 2, @DatabaseName = @CurrentDatabaseName, @SchemaName = @CurrentSchemaName, @ObjectName = @CurrentObjectName, @ObjectType = @CurrentObjectType, @IndexName = @CurrentIndexName, @IndexType = @CurrentIndexType, @StatisticsName = @CurrentStatisticsName, @LogToTable = @LogToTable, @Execute = @Execute
           SET @Error = @@ERROR
           IF @Error <> 0 SET @CurrentCommandOutput14 = @Error
           IF @CurrentCommandOutput14 <> 0 SET @ReturnCode = @CurrentCommandOutput14
